@@ -14,11 +14,14 @@
 ; See the License for the specific language governing permissions and
 ; limitations under the License.
 
+
 (require ffi/unsafe
          ffi/unsafe/define)
 (require racket/format)
 
-(provide py-eval)
+
+(provide py-eval
+         py-run)
 
 
 ; Definer for Python's "limited" stable API.
@@ -26,6 +29,8 @@
 
 
 ; Python Runtime Constants.
+(define Py_single_input 256)
+(define Py_file_input 257)
 (define Py_eval_input 258)
 
 
@@ -46,7 +51,10 @@
 (define-python Py_DecRef (_fun _PyObject -> _void))
 (define-python Py_CompileString (_fun _string _string _int -> _PyObject))
 (define-python PyEval_EvalCode (_fun _PyObject _PyObject _PyObject -> _PyObject))
-
+(define-python PyEval_GetBuiltins (_fun -> _PyObject))
+(define-python PyObject_Call (_fun _PyObject _PyObject _PyObject -> _PyObject))
+(define-python PyObject_CallNoArgs (_fun _PyObject -> _PyObject))
+(define-python PyCallable_Check (_fun _PyObject -> _bool))
 
 ; Python runtime bool object functions.
 (define-python PyBool_FromLong (_fun _bool -> _PyObject))
@@ -73,17 +81,20 @@
 ; Python runtime tuple object functions.
 (define-python PyTuple_New (_fun _ssize -> _PyObject))
 (define-python PyTuple_Size (_fun _PyObject -> _ssize))
-(define-python PyTuple_GetItem (_fun _PyObject _size -> _PyObject))
+(define-python PyTuple_GetItem (_fun _PyObject _ssize -> _PyObject))
+(define-python PyTuple_SetItem (_fun _PyObject _ssize _PyObject -> (r : _int) -> (unless (eq? r 0) (error "failed"))))
 
 
 ; Python runtime list object functions.
 (define-python PyList_New (_fun _ssize -> _PyObject))
 (define-python PyList_Size (_fun _PyObject -> _ssize))
 (define-python PyList_GetItem (_fun _PyObject _size -> _PyObject))
+(define-python PyList_Append (_fun _PyObject _PyObject -> (r : _int) -> (unless (eq? r 0) (error "failed"))))
 
 
 ; Python runtime dictionary object functions.
 (define-python PyDict_New (_fun -> _PyObject))
+(define-python PyDict_SetItemString (_fun _PyObject _string  _PyObject -> (r : _int) -> (unless (eq? r 0) (error "failed"))))
 (define-python PyDict_Keys (_fun _PyObject -> _PyObject))
 (define-python PyDict_Values (_fun _PyObject -> _PyObject))
 (define-python PyDict_Size (_fun _PyObject -> _ssize))
@@ -219,6 +230,12 @@
        (unpack (PyList_GetItem vals i))))))
 
 
+; Wrap a Python callable with a Racket function.
+(define (wrap-callable py-object)
+  (lambda args
+    (unpack (PyObject_Call py-object (pack (list->vector args)) #f))))
+
+
 ; Convert a Python object into a Racket equivalent.
 (define (unpack py-object)
   (cond
@@ -229,20 +246,68 @@
     [(py-tuple? py-object) (unpack-tuple py-object)]
     [(py-list? py-object) (unpack-list py-object)]
     [(py-dict? py-object) (unpack-dict py-object)]
-    [else (error "cannot unpack python object" py-object)]))
+    [(PyCallable_Check py-object) (wrap-callable py-object)]
+    [else (list (unpack-str (PyObject_Str py-object)) py-object)]))
 
 
-; Evaluate Python from a string.
+; Create a Python tuple from a Racket vector.
+(define (pack-vector vec)
+  (let* ([size (vector-length vec)]
+         [tuple (PyTuple_New size)])
+    (for ([i size])
+      (PyTuple_SetItem tuple i (pack (vector-ref vec i))))
+    tuple))
+
+
+; Create a Python list from a Racket list.
+(define (pack-list lst)
+  (let ([pylist (PyList_New 0)])
+    (for ([item lst])
+      (PyList_Append pylist (pack item)))
+    pylist))
+
+
+; Convert a Racket object to a Python equivalent.
+(define (pack rkt-object)
+  (cond
+    [(flonum? rkt-object) (PyFloat_FromDouble rkt-object)]
+    [(integer? rkt-object) (PyLong_FromLongLong rkt-object)]
+    [(string? rkt-object) (PyUnicode_FromString rkt-object)]
+    [(vector? rkt-object) (pack-vector rkt-object)]
+    [(list? rkt-object) (pack-list rkt-object)]
+    [else (error "Cannot convert to Python equivalent." rkt-object)]))
+
+
+; Evaluate a Python expression from a string.
 (define (py-eval src)
   (let ([compiled (Py_CompileString src "" Py_eval_input)])
     (check-py-error)
-    (let* ([globals (PyDict_New)]
-           [locals (PyDict_New)]
-           [ret (PyEval_EvalCode compiled globals locals)])
-      (check-py-error)
-      (Py_DecRef compiled)
-      (unpack ret))))
+    (let ([globals (PyDict_New)]
+          [locals (PyDict_New)])
+      (PyDict_SetItemString globals "__builtins__" (PyEval_GetBuiltins))
+      (let ([ret (PyEval_EvalCode compiled globals locals)])
+        (check-py-error)
+        (Py_DecRef compiled)
+        (unpack ret)))))
+
+
+; Evaluate a Python source from a string.
+(define (py-run src filename)
+  (let ([compiled (Py_CompileString src filename Py_file_input)])
+    (check-py-error)
+    (let ([globals (PyDict_New)]
+          [locals (PyDict_New)])
+      (PyDict_SetItemString globals "__builtins__" (PyEval_GetBuiltins))
+      (let ([ret (PyEval_EvalCode compiled globals locals)])
+        (check-py-error)
+        (Py_DecRef compiled)
+        (unpack locals)))))
 
 
 ; Test
-(py-eval "(123, [456, 789], 'Hail Eris!', {'a':1, 'b':2})")
+(py-eval "(min(123, 456), [456, 789], 'Hail Eris!', {'a':1, 'b':2})")
+
+(define fnord (hash-ref (py-run (~a "def fnord(a, b, c):\n"
+                                    "    return a * b + c\n")
+                                "generated") "fnord"))
+(fnord 2 4 6)
