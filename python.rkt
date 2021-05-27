@@ -16,12 +16,16 @@
 
 
 (require ffi/unsafe
-         ffi/unsafe/define)
-(require racket/format)
+         ffi/unsafe/define
+         racket/format
+         racket/port
+         racket/undefined)
 
 
-(provide py-eval
-         py-run)
+(provide py-dir
+         py-eval
+         py-run
+         py-import)
 
 
 ; Definer for Python's "limited" stable API.
@@ -95,6 +99,7 @@
 ; Python runtime dictionary object functions.
 (define-python PyDict_New (_fun -> _PyObject))
 (define-python PyDict_SetItemString (_fun _PyObject _string  _PyObject -> (r : _int) -> (unless (eq? r 0) (error "failed"))))
+(define-python PyDict_GetItemString (_fun _PyObject _string -> _PyObject))
 (define-python PyDict_Keys (_fun _PyObject -> _PyObject))
 (define-python PyDict_Values (_fun _PyObject -> _PyObject))
 (define-python PyDict_Size (_fun _PyObject -> _ssize))
@@ -233,12 +238,15 @@
 ; Wrap a Python callable with a Racket function.
 (define (wrap-callable py-object)
   (lambda args
-    (unpack (PyObject_Call py-object (pack (list->vector args)) #f))))
+    (let ([ret (PyObject_Call py-object (pack (list->vector args)) #f)])
+      (check-py-error)
+      (unpack ret))))
 
 
 ; Convert a Python object into a Racket equivalent.
 (define (unpack py-object)
   (cond
+    [(not py-object) (error "can't unpack nullptr")]
     [(py-bool? py-object) (unpack-bool py-object)]
     [(py-int? py-object) (PyLong_AsLongLong py-object)]
     [(py-float? py-object) (PyFloat_AsDouble py-object)]
@@ -247,7 +255,7 @@
     [(py-list? py-object) (unpack-list py-object)]
     [(py-dict? py-object) (unpack-dict py-object)]
     [(PyCallable_Check py-object) (wrap-callable py-object)]
-    [else (list (unpack-str (PyObject_Str py-object)) py-object)]))
+    [else undefined]))
 
 
 ; Create a Python tuple from a Racket vector.
@@ -278,36 +286,65 @@
     [else (error "Cannot convert to Python equivalent." rkt-object)]))
 
 
+; Python module struct.
+(struct py-module (file-name
+                   compiled
+                   global-scope
+                   local-scope)
+  #:transparent
+  #:property prop:procedure
+  (lambda (self symbol)
+    (let ([ret (PyDict_GetItemString (py-module-local-scope self) symbol)])
+      (unless ret (error "attribute error") symbol)
+      (unpack ret))))
+
+
+; Return a list of symbols that can be extracted from a py-module.
+(define (py-dir module)
+  (unpack (PyDict_Keys (py-module-local-scope module))))
+
+
 ; Evaluate a Python expression from a string.
-(define (py-eval src)
-  (let ([compiled (Py_CompileString src "" Py_eval_input)])
-    (check-py-error)
-    (let ([globals (PyDict_New)]
-          [locals (PyDict_New)])
-      (PyDict_SetItemString globals "__builtins__" (PyEval_GetBuiltins))
+(define (py-eval src [module #f])
+
+  (define (py-eval-inner globals locals)
+    (let ([compiled (Py_CompileString src "" Py_eval_input)])
+      (check-py-error)
       (let ([ret (PyEval_EvalCode compiled globals locals)])
         (check-py-error)
         (Py_DecRef compiled)
-        (unpack ret)))))
+        (unpack ret))))
+
+  (define (py-eval-anonymous)
+    (let ([globals (PyDict_New)]
+          [locals (PyDict_New)])
+      (PyDict_SetItemString globals "__builtins__" (PyEval_GetBuiltins))
+      (begin0
+        (py-eval-inner globals locals)
+        (Py_DecRef globals)
+        (Py_DecRef locals))))
+
+  (if module
+      (py-eval-inner (py-module-global-scope module)
+                     (py-module-local-scope module))
+      (py-eval-anonymous)))
 
 
 ; Evaluate a Python source from a string.
-(define (py-run src filename)
-  (let ([compiled (Py_CompileString src filename Py_file_input)])
+(define (py-run src [file-name "anonymous"])
+  (let ([compiled (Py_CompileString src file-name Py_file_input)])
     (check-py-error)
     (let ([globals (PyDict_New)]
           [locals (PyDict_New)])
       (PyDict_SetItemString globals "__builtins__" (PyEval_GetBuiltins))
       (let ([ret (PyEval_EvalCode compiled globals locals)])
         (check-py-error)
-        (Py_DecRef compiled)
-        (unpack locals)))))
+        (py-module file-name compiled globals locals)))))
 
 
-; Test
-(py-eval "(min(123, 456), [456, 789], 'Hail Eris!', {'a':1, 'b':2})")
-
-(define fnord (hash-ref (py-run (~a "def fnord(a, b, c):\n"
-                                    "    return a * b + c\n")
-                                "generated") "fnord"))
-(fnord 2 4 6)
+; Import a Python module from a file.
+(define (py-import file-path)
+  (let* ([in-file (open-input-file file-path #:mode 'text)]
+         [src (port->string in-file)])
+    (close-input-port in-file)
+    (py-run src file-path)))
