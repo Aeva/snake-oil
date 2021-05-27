@@ -15,17 +15,22 @@
 ; limitations under the License.
 
 
-(require ffi/unsafe
+(require (for-syntax racket/base
+                     racket/sequence
+                     racket/syntax)
+         ffi/unsafe
          ffi/unsafe/define
          racket/format
          racket/port
-         racket/undefined)
+         racket/undefined
+         syntax/parse/define)
 
 
 (provide py-dir
          py-eval
          py-run
-         py-import)
+         py-import
+         require-py)
 
 
 ; Definer for Python's "limited" stable API.
@@ -348,3 +353,13 @@
          [src (port->string in-file)])
     (close-input-port in-file)
     (py-run src file-path)))
+
+
+; Handy requiresque macro.
+(define-syntax-parse-rule (require-py path:str id:id ...)
+  #:with (id-string ...)
+  (for/list ([id-stx (in-syntax #'(id ...))])
+    (symbol->string (syntax-e id-stx)))
+  (begin
+    (define py-module (py-import path))
+    (define id (py-module 'id-string)) ...))
