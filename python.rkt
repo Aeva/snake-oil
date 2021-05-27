@@ -288,7 +288,6 @@
 
 ; Python module struct.
 (struct py-module (file-name
-                   compiled
                    global-scope
                    local-scope)
   #:transparent
@@ -339,7 +338,8 @@
       (PyDict_SetItemString globals "__builtins__" (PyEval_GetBuiltins))
       (let ([ret (PyEval_EvalCode compiled globals locals)])
         (check-py-error)
-        (py-module file-name compiled globals locals)))))
+        (Py_DecRef compiled)
+        (py-module file-name globals locals)))))
 
 
 ; Import a Python module from a file.
