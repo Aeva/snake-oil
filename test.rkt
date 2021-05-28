@@ -1,14 +1,18 @@
 #lang racket/base
 
-(require racket/format
-         "python.rkt")
+(require "python.rkt")
 
-(define test.py (py-import "test.py"))
+; Import functions, etc from python source files!
+(require-py "test.py" fnord)
+(fnord 1 2 3)
 
-(define fnord (test.py "fnord"))
+; Or from modules!
+(require-py "math" radians)
+(radians 90)
 
-(fnord 2 4 6)
-
+; Or just vibe!
 (py-eval "(min(123, 456), [456, 789], 'Hail Eris!', {'a':1, 'b':2})")
 
-(py-eval "fnord(6, 7, 8)" test.py)
+; Or if you need to get really fancy,
+(define math (py-import "math"))
+(py-eval "sqrt(2)" math)

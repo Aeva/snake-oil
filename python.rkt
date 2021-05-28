@@ -64,6 +64,9 @@
 (define-python PyObject_Call (_fun _PyObject _PyObject _PyObject -> _PyObject))
 (define-python PyObject_CallNoArgs (_fun _PyObject -> _PyObject))
 (define-python PyCallable_Check (_fun _PyObject -> _bool))
+(define-python PyImport_ImportModule (_fun _string -> _PyObject))
+(define-python PyModule_GetDict (_fun _PyObject -> _PyObject))
+
 
 ; Python runtime bool object functions.
 (define-python PyBool_FromLong (_fun _bool -> _PyObject))
@@ -163,7 +166,8 @@
    py-str-type
    py-tuple-type
    py-list-type
-   py-dict-type)
+   py-dict-type
+   py-module-type)
   ((lambda ()
      (when (Py_IsInitialized)
        (Py_Finalize))
@@ -177,7 +181,8 @@
       (py-type (PyUnicode_FromString ""))
       (py-type (PyTuple_New 0))
       (py-type (PyList_New 0))
-      (py-type (PyDict_New))))))
+      (py-type (PyDict_New))
+      (py-type (PyImport_ImportModule "__hello__"))))))
 
 
 ; Python type tests.
@@ -201,6 +206,9 @@
 
 (define (py-dict? py-object)
   (eq? (py-type py-object) py-dict-type))
+
+(define (py-module? py-object)
+  (eq? (py-type py-object) py-module-type))
 
 
 ; Convert a Python bool into a Racket bool.
@@ -240,6 +248,11 @@
        (unpack (PyList_GetItem vals i))))))
 
 
+; Convert a Python module into a Racket hash.
+(define (unpack-module py-module)
+  (unpack (PyModule_GetDict py-module)))
+
+
 ; Wrap a Python callable with a Racket function.
 (define (wrap-callable py-object)
   (lambda args
@@ -260,6 +273,7 @@
     [(py-list? py-object) (unpack-list py-object)]
     [(py-dict? py-object) (unpack-dict py-object)]
     [(PyCallable_Check py-object) (wrap-callable py-object)]
+    [(py-module? py-object) (unpack-module py-object)]
     [else undefined]))
 
 
@@ -292,24 +306,24 @@
 
 
 ; Python module struct.
-(struct py-module (file-name
-                   global-scope
-                   local-scope)
+(struct py-context (file-name
+                    global-scope
+                    local-scope)
   #:transparent
   #:property prop:procedure
   (lambda (self symbol)
-    (let ([ret (PyDict_GetItemString (py-module-local-scope self) symbol)])
+    (let ([ret (PyDict_GetItemString (py-context-local-scope self) symbol)])
       (unless ret (error "attribute error") symbol)
       (unpack ret))))
 
 
-; Return a list of symbols that can be extracted from a py-module.
+; Return a list of symbols that can be extracted from a py-context.
 (define (py-dir module)
-  (unpack (PyDict_Keys (py-module-local-scope module))))
+  (unpack (PyDict_Keys (py-context-local-scope module))))
 
 
 ; Evaluate a Python expression from a string.
-(define (py-eval src [module #f])
+(define (py-eval src [context #f])
 
   (define (py-eval-inner globals locals)
     (let ([compiled (Py_CompileString src "" Py_eval_input)])
@@ -328,9 +342,9 @@
         (Py_DecRef globals)
         (Py_DecRef locals))))
 
-  (if module
-      (py-eval-inner (py-module-global-scope module)
-                     (py-module-local-scope module))
+  (if context
+      (py-eval-inner (py-context-global-scope context)
+                     (py-context-local-scope context))
       (py-eval-anonymous)))
 
 
@@ -344,15 +358,30 @@
       (let ([ret (PyEval_EvalCode compiled globals locals)])
         (check-py-error)
         (Py_DecRef compiled)
-        (py-module file-name globals locals)))))
+        (py-context file-name globals locals)))))
 
 
-; Import a Python module from a file.
+; Import a Python stuff from a module or a file.
 (define (py-import file-path)
-  (let* ([in-file (open-input-file file-path #:mode 'text)]
-         [src (port->string in-file)])
-    (close-input-port in-file)
-    (py-run src file-path)))
+
+  (define (fake-import)
+    (let* ([in-file (open-input-file file-path #:mode 'text)]
+             [src (port->string in-file)])
+        (close-input-port in-file)
+        (py-run src file-path)))
+
+  (define (actual-import module)
+    (let ([globals (PyDict_New)]
+          [locals (PyModule_GetDict module)])
+      (PyDict_SetItemString globals "__builtins__" (PyEval_GetBuiltins))
+      (py-context file-path globals locals)))
+
+  (if (file-exists? file-path)
+      (fake-import)
+      (let ([module (PyImport_ImportModule file-path)])
+        (if module
+            (actual-import module)
+            (error "No such module or file:" file-path)))))
 
 
 ; Handy requiresque macro.
@@ -361,5 +390,5 @@
   (for/list ([id-stx (in-syntax #'(id ...))])
     (symbol->string (syntax-e id-stx)))
   (begin
-    (define py-module (py-import path))
-    (define id (py-module 'id-string)) ...))
+    (define py-context (py-import path))
+    (define id (py-context 'id-string)) ...))
