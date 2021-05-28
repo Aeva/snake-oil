@@ -182,7 +182,7 @@
       (py-type (PyTuple_New 0))
       (py-type (PyList_New 0))
       (py-type (PyDict_New))
-      (py-type (PyImport_ImportModule "__hello__"))))))
+      (py-type (PyImport_ImportModule "math"))))))
 
 
 ; Python type tests.
