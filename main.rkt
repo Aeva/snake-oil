@@ -34,7 +34,7 @@
 
 
 ; Definer for Python's "limited" stable API.
-(define-ffi-definer define-python (ffi-lib "python3.dll"))
+(define-ffi-definer define-python (ffi-lib "python3"))
 
 
 ; Python Runtime Constants.
