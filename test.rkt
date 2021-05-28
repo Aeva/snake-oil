@@ -1,6 +1,6 @@
 #lang racket/base
 
-(require "python.rkt")
+(require snake-oil)
 
 ; Import functions, etc from python source files!
 (require-py "test.py" fnord)
