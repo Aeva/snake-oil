@@ -22,6 +22,8 @@
          ffi/unsafe/define
          racket/format
          racket/port
+         racket/string
+         racket/system
          racket/undefined
          syntax/parse/define)
 
@@ -33,11 +35,43 @@
          require-py)
 
 
+; Shell out to Python to learn more about the local Python install.
+(define (python-config-var var-name)
+  (let ([python-exe (or
+                     (find-executable-path "python3")
+                     (find-executable-path "python"))]
+        [args (~a "-c"
+                  "import sys;"
+                  "assert(sys.version_info[0] >= 3);"
+                  "from distutils import sysconfig;"
+                  "print(sysconfig.get_config_var('" var-name "'));")])
+    (unless python-exe (error "Unable to find Python 3"))
+    (let*-values ([(proc out-port in-port err-port)
+                   (subprocess #f #f #f python-exe args)]
+                  [(std-out std-err)
+                   (values (port->string out-port) (port->string err-port))])
+      (close-input-port out-port)
+      (close-output-port in-port)
+      (close-input-port err-port)
+      (subprocess-wait proc)
+      (unless (eq? 0 (subprocess-status proc))
+        (error std-err))
+      (let ([ret (string-trim std-out)])
+        (when (equal? ret "None")
+          (error "Python config var unset:" var-name))
+        ret))))
+
+
 ; Definer for Python's "limited" stable API.
-(define-ffi-definer define-python (ffi-lib "python3"))
+(define python-lib
+  (or
+   (ffi-lib "python3" #:fail (lambda () #f))
+   (ffi-lib "libpython3" #:fail (lambda () #f))
+   (ffi-lib (python-config-var "LDLIBRARY"))))
+(define-ffi-definer define-python python-lib)
 
 
-; Python Runtime Constants.
+; Python runtime constants.
 (define Py_single_input 256)
 (define Py_file_input 257)
 (define Py_eval_input 258)
@@ -366,9 +400,9 @@
 
   (define (fake-import)
     (let* ([in-file (open-input-file file-path #:mode 'text)]
-             [src (port->string in-file)])
-        (close-input-port in-file)
-        (py-run src file-path)))
+           [src (port->string in-file)])
+      (close-input-port in-file)
+      (py-run src file-path)))
 
   (define (actual-import module)
     (let ([globals (PyDict_New)]
