@@ -8,6 +8,8 @@ Dependencies
 
 You need Python 3 installed on your system with the system PATH environment variable set up correctly.
 
+Linux users will probably have to install `libpython3` or an equivalent package.
+
 Installation
 ------------
 
