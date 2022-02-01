@@ -6,7 +6,7 @@ This is a library for embedding Python 3 in racket.
 Dependencies
 ------------
 
-You need Python 3 installed on your system with the system PATH environment variable set up correctly.
+You need Python 3.10 or newer installed on your system with the system PATH environment variable set up correctly.
 
 Linux users will probably have to install `libpython3` or an equivalent package.
 
@@ -48,4 +48,4 @@ Exported functions can be called from Racket with integers, flonums, strings, li
 Is this "production ready"?
 ---------------------------
 
-Absolutely not.  This is not managing reference counts for most things, tracebacks leave something to be desired, and there's probably a bunch of other problems.
+No.  This is a work in progress with no known users.

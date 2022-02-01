@@ -1,6 +1,6 @@
 #lang racket/base
 
-; Copyright 2021 Aeva Palecek
+; Copyright 2022 Aeva Palecek
 ;
 ; Licensed under the Apache License, Version 2.0 (the "License");
 ; you may not use this file except in compliance with the License.
@@ -86,73 +86,173 @@
 (define _PyObject (_cpointer/null _object))
 
 
+; An executor and control thread for managing ownership of python references.
+(define ref-executor (make-will-executor))
+(void
+ (thread
+  (λ ()
+    (let loop ()
+      (will-execute ref-executor)
+      (loop)))))
+
+
+; Schedule a lazy Py_DecRef for a new python reference.
+(define (handle-new-ref py-obj)
+  (when py-obj
+    (will-register ref-executor py-obj
+                   (λ (py-obj)
+                     (Py_DecRef py-obj))))
+  py-obj)
+
+
+; Convert a borrowed reference to a strong reference and schedule a lazy Py_DecRef.
+(define (handle-borrowed-ref py-obj)
+  (when py-obj
+    (Py_IncRef py-obj)
+    (handle-new-ref py-obj))
+  py-obj)
+
+
 ; Python runtime core functions.
 (define-python Py_Initialize (_fun -> _void))
 (define-python Py_IsInitialized (_fun -> _bool))
 (define-python Py_Finalize (_fun -> _void))
 (define-python Py_IncRef (_fun _PyObject -> _void))
+(define-python Py_NewRef (_fun _PyObject -> _PyObject))
+(define-python Py_XNewRef (_fun _PyObject -> _PyObject))
 (define-python Py_DecRef (_fun _PyObject -> _void))
-(define-python Py_CompileString (_fun _string _string _int -> _PyObject))
-(define-python PyEval_EvalCode (_fun _PyObject _PyObject _PyObject -> _PyObject))
-(define-python PyEval_GetBuiltins (_fun -> _PyObject))
-(define-python PyObject_Call (_fun _PyObject _PyObject _PyObject -> _PyObject))
-(define-python PyObject_CallNoArgs (_fun _PyObject -> _PyObject))
+
+(define-python Py_CompileString (_fun _string _string _int
+                                      -> (new-ref : _PyObject)
+                                      -> (handle-new-ref new-ref)))
+
+(define-python PyEval_EvalCode (_fun _PyObject _PyObject _PyObject
+                                     -> (new-ref : _PyObject)
+                                     -> (handle-new-ref new-ref)))
+
+(define-python PyEval_GetBuiltins (_fun
+                                   -> (borrowed-ref : _PyObject)
+                                   -> (handle-borrowed-ref borrowed-ref)))
+
+(define-python PyObject_Call (_fun _PyObject _PyObject _PyObject
+                                   -> (new-ref : _PyObject)
+                                   -> (handle-new-ref new-ref)))
+
 (define-python PyCallable_Check (_fun _PyObject -> _bool))
-(define-python PyImport_ImportModule (_fun _string -> _PyObject))
-(define-python PyModule_GetDict (_fun _PyObject -> _PyObject))
+
+(define-python PyImport_ImportModule (_fun _string
+                                           -> (new-ref : _PyObject)
+                                           -> (handle-new-ref new-ref)))
+
+(define-python PyModule_GetDict (_fun _PyObject
+                                      -> (borrowed-ref : _PyObject)
+                                      -> (handle-borrowed-ref borrowed-ref)))
 
 
 ; Python runtime bool object functions.
-(define-python PyBool_FromLong (_fun _bool -> _PyObject))
+(define-python PyBool_FromLong (_fun _bool
+                                     -> (new-ref : _PyObject)
+                                     -> (handle-new-ref new-ref)))
 
 
 ; Python runtime integer object functions.
 (define-python PyLong_AsLong (_fun _PyObject -> _long))
 (define-python PyLong_AsLongLong (_fun _PyObject -> _llong))
-(define-python PyLong_FromLong (_fun _long -> _PyObject))
-(define-python PyLong_FromLongLong (_fun _llong -> _PyObject))
+(define-python PyLong_FromLong (_fun _long
+                                     -> (new-ref : _PyObject)
+                                     -> (handle-new-ref new-ref)))
+(define-python PyLong_FromLongLong (_fun _llong
+                                         -> (new-ref : _PyObject)
+                                         -> (handle-new-ref new-ref)))
 
 
 ; Python runtime float object functions.
 (define-python PyFloat_AsDouble (_fun _PyObject -> _double))
-(define-python PyFloat_FromDouble (_fun _double -> _PyObject))
+(define-python PyFloat_FromDouble (_fun _double
+                                        -> (new-ref : _PyObject)
+                                        -> (handle-new-ref new-ref)))
 
 
 ; Python runtime string object functions.
 (define-python PyUnicode_GetLength (_fun _PyObject -> _ssize))
 (define-python PyUnicode_AsUCS4 (_fun _PyObject _pointer _ssize _bool -> _string/ucs-4))
-(define-python PyUnicode_FromString (_fun _string -> _PyObject))
+
+(define-python PyUnicode_FromString (_fun _string
+                                          -> (new-ref : _PyObject)
+                                          -> (handle-new-ref new-ref)))
 
 
-; Python runtime tuple object functions.
-(define-python PyTuple_New (_fun _ssize -> _PyObject))
-(define-python PyTuple_Size (_fun _PyObject -> _ssize))
-(define-python PyTuple_GetItem (_fun _PyObject _ssize -> _PyObject))
-(define-python PyTuple_SetItem (_fun _PyObject _ssize _PyObject -> (r : _int) -> (unless (eq? r 0) (error "failed"))))
+; Python runtime sequence protocol functions and related constructors.
+(define-python PyTuple_New (_fun _ssize
+                                 -> (new-ref : _PyObject)
+                                 -> (handle-new-ref new-ref)))
 
+(define-python PyList_New (_fun _ssize
+                                -> (new-ref : _PyObject)
+                                -> (handle-new-ref new-ref)))
 
-; Python runtime list object functions.
-(define-python PyList_New (_fun _ssize -> _PyObject))
-(define-python PyList_Size (_fun _PyObject -> _ssize))
-(define-python PyList_GetItem (_fun _PyObject _size -> _PyObject))
-(define-python PyList_Append (_fun _PyObject _PyObject -> (r : _int) -> (unless (eq? r 0) (error "failed"))))
+(define-python PyList_SetItem (_fun _PyObject
+                                    _ssize
+                                    (item : _PyObject) ; <--- NOTE: This reference *is* stolen, so we have to increment the ref again.
+                                    -> (r : _int)
+                                    -> (begin
+                                         (Py_IncRef item)
+                                         (when (eq? r -1) (check-py-error)))))
+
+(define-python PySequence_Tuple (_fun _PyObject
+                                      -> (new-ref : _PyObject)
+                                      -> (handle-new-ref new-ref)))
+
+(define-python PySequence_GetItem (_fun _PyObject
+                                        _ssize
+                                        -> (new-ref : _PyObject)
+                                        -> (handle-new-ref new-ref)))
+
+; NOTE, using PySequence_SetItem instead of PyList_SetItem to populate
+; uninitialized list items will crash the program.
+(define-python PySequence_SetItem (_fun _PyObject
+                                        _ssize
+                                        _PyObject ; <--- NOTE: The reference is *not* stolen.
+                                        -> (r : _int)
+                                        -> (when (eq? r -1) (check-py-error))))
+
+(define-python PySequence_Size (_fun _PyObject -> _ssize))
 
 
 ; Python runtime dictionary object functions.
-(define-python PyDict_New (_fun -> _PyObject))
-(define-python PyDict_SetItemString (_fun _PyObject _string  _PyObject -> (r : _int) -> (unless (eq? r 0) (error "failed"))))
-(define-python PyDict_GetItemString (_fun _PyObject _string -> _PyObject))
-(define-python PyDict_Keys (_fun _PyObject -> _PyObject))
-(define-python PyDict_Values (_fun _PyObject -> _PyObject))
+(define-python PyDict_New (_fun
+                           -> (new-ref : _PyObject)
+                           -> (handle-new-ref new-ref)))
+
+(define-python PyDict_SetItemString (_fun _PyObject
+                                          _string
+                                          _PyObject ; <--- NOTE: The reference is *not* stolen.
+                                          -> (r : _int)
+                                          -> (when (eq? r -1) (check-py-error))))
+
+(define-python PyDict_GetItemString (_fun _PyObject _string
+                                          -> (borrowed-ref : _PyObject)
+                                          -> (handle-borrowed-ref borrowed-ref)))
+
+(define-python PyDict_Keys (_fun _PyObject
+                                 -> (new-ref : _PyObject)
+                                 -> (handle-new-ref new-ref)))
+
+(define-python PyDict_Values (_fun _PyObject
+                                   -> (new-ref : _PyObject)
+                                   -> (handle-new-ref new-ref)))
+
 (define-python PyDict_Size (_fun _PyObject -> _ssize))
 
 
 ; Python runtime object protocol functions.
-(define-python PyObject_Repr (_fun _PyObject -> _PyObject))
-(define-python PyObject_Str (_fun _PyObject -> _PyObject))
-(define-python PyObject_Length (_fun _PyObject -> _ssize))
-(define-python PyObject_GetIter (_fun _PyObject -> _PyObject))
-(define-python PyIter_Next (_fun _PyObject -> _PyObject))
+(define-python PyObject_Repr (_fun _PyObject
+                                   -> (new-ref : _PyObject)
+                                   -> (handle-new-ref new-ref)))
+
+(define-python PyObject_Str (_fun _PyObject
+                                  -> (new-ref : _PyObject)
+                                  -> (handle-new-ref new-ref)))
 
 
 ; Python runtime exception handling.
@@ -161,24 +261,22 @@
         (pvalue : (_ptr o _PyObject))
         (ptrace : (_ptr o _PyObject))
         -> _void
-        -> (values (if ptype ptype #f)
-                   (if pvalue pvalue #f)
-                   (if ptrace ptrace #f))))
+        -> (values (if ptype (handle-new-ref ptype) #f)
+                   (if pvalue (handle-new-ref pvalue) #f)
+                   (if ptrace (handle-new-ref ptrace) #f))))
 
 
 ; High level error handling.
 (define (check-py-error)
   (define (err-str err-obj default)
     (if err-obj
-        (let ([unpacked (unpack-str (PyObject_Str err-obj))])
-          (Py_DecRef err-obj)
-          unpacked)
+        (unpack-str (PyObject_Str err-obj))
         default))
   (let-values ([(err-type err-value err-trace) (PyErr_Fetch)])
     (when err-type
       (error (~a "uncaught python exception:\n"
                  (err-str err-type "") "\n"
-                 (err-str err-value "no errror value available") "\n"
+                 (err-str err-value "no error value available") "\n"
                  (err-str err-trace "no traceback available") "\n")))))
     
 
@@ -203,9 +301,8 @@
    py-dict-type
    py-module-type)
   ((lambda ()
-     (when (Py_IsInitialized)
-       (Py_Finalize))
-     (Py_Initialize)
+     (unless (Py_IsInitialized)
+       (Py_Initialize))
      (values
       (PyBool_FromLong #t)
       (PyBool_FromLong #f)
@@ -259,16 +356,16 @@
 
 ; Convert a Python tuple to a Racket vector.
 (define (unpack-tuple py-tuple)
-  (let ([size (PyTuple_Size py-tuple)])
+  (let ([size (PySequence_Size py-tuple)])
     (for/vector #:length size ([i size])
-      (unpack (PyTuple_GetItem py-tuple i)))))
+      (unpack (PySequence_GetItem py-tuple i)))))
 
 
 ; Convert a Python list into a Racket list.
 (define (unpack-list py-list)
-  (let ([size (PyList_Size py-list)])
+  (let ([size (PySequence_Size py-list)])
     (for/list ([i size])
-      (unpack (PyList_GetItem py-list i)))))
+      (unpack (PySequence_GetItem py-list i)))))
 
 
 ; Convert a Python dict into a Racket hash.
@@ -278,8 +375,8 @@
         [vals (PyDict_Values py-dict)])
     (for/hash ([i size])
       (values
-       (unpack (PyList_GetItem keys i))
-       (unpack (PyList_GetItem vals i))))))
+       (unpack (PySequence_GetItem keys i))
+       (unpack (PySequence_GetItem vals i))))))
 
 
 ; Convert a Python module into a Racket hash.
@@ -314,17 +411,19 @@
 ; Create a Python tuple from a Racket vector.
 (define (pack-vector vec)
   (let* ([size (vector-length vec)]
-         [tuple (PyTuple_New size)])
-    (for ([i size])
-      (PyTuple_SetItem tuple i (pack (vector-ref vec i))))
-    tuple))
+         [py-list (PyList_New size)])
+    (for ([item (in-vector vec)]
+          [i size])
+      (PyList_SetItem py-list i (pack item)))
+    (PySequence_Tuple py-list)))
 
 
 ; Create a Python list from a Racket list.
 (define (pack-list lst)
-  (let ([pylist (PyList_New 0)])
-    (for ([item lst])
-      (PyList_Append pylist (pack item)))
+  (let ([pylist (PyList_New (length lst))])
+    (for ([item lst]
+          [i (in-range (length lst))])
+      (PyList_SetItem pylist i (pack item)))
     pylist))
 
 
@@ -364,17 +463,13 @@
       (check-py-error)
       (let ([ret (PyEval_EvalCode compiled globals locals)])
         (check-py-error)
-        (Py_DecRef compiled)
         (unpack ret))))
 
   (define (py-eval-anonymous)
     (let ([globals (PyDict_New)]
           [locals (PyDict_New)])
       (PyDict_SetItemString globals "__builtins__" (PyEval_GetBuiltins))
-      (begin0
-        (py-eval-inner globals locals)
-        (Py_DecRef globals)
-        (Py_DecRef locals))))
+      (py-eval-inner globals locals)))
 
   (if context
       (py-eval-inner (py-context-global-scope context)
@@ -391,8 +486,8 @@
       (PyDict_SetItemString globals "__builtins__" (PyEval_GetBuiltins))
       (let ([ret (PyEval_EvalCode compiled globals locals)])
         (check-py-error)
-        (Py_DecRef compiled)
         (py-context file-name globals locals)))))
+
 
 
 ; Import a Python stuff from a module or a file.
